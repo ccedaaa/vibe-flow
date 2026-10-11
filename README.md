@@ -6,7 +6,8 @@
 
 <p align="center">
   <strong>按住遥控器说话，松开后检查文字，再手动确认发送</strong><br>
-  把小米 RC003 / MI RC 变成 Windows 上可检查、可恢复的语音输入工具
+  把小米蓝牙遥控器 / 小米语音蓝牙遥控器（小米 RC003 / MI RC）变成 Windows 上可检查、可恢复的语音输入工具<br>
+  <sub>适用遥控器：小米蓝牙遥控器 · 小米语音蓝牙遥控器 · Xiaomi Bluetooth Voice Remote（MI RC、RC003）</sub>
 </p>
 
 ## V2.0.0 离键闭环正式版
