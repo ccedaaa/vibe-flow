@@ -188,6 +188,13 @@ internal static class VoxDeckInputBridge
     private static DateTime lastRawActionUtc = DateTime.MinValue;
     private static string lastRawAction = "";
     private static string lastActionSource = "";
+    // The last routed edge is not evidence that a key was pressed: a person presses and releases, so by
+    // the time the heartbeat is read this reads "...:up". First-run setup asks for exactly one direction
+    // press, and judging that from the last edge alone made the task impossible to pass with a normal
+    // press. The press is therefore recorded on its own, next to the edge that keeps the status line honest.
+    private static DateTime lastRawPressUtc = DateTime.MinValue;
+    private static string lastRawPress = "";
+    private static string lastRawPressSource = "";
     private static readonly object actionReceiptLock = new object();
     private static long actionReceiptSequence;
     private static ActionExecutionReceipt lastExecutionReceipt;
@@ -200,13 +207,36 @@ internal static class VoxDeckInputBridge
     private static int smartProfileEvaluationRunning;
 
     private static readonly string Root = AppDomain.CurrentDomain.BaseDirectory;
-    private static readonly string ConfigPath = Path.Combine(Root, "voxdeck-shortcuts.json");
-    private static readonly string LogPath = Path.Combine(Root, "input-bridge-log.txt");
-    private static readonly string HealthPath = Path.Combine(Root, "input-bridge-health.json");
-    private static readonly string CustomCaptureRequestPath = Path.Combine(Root, "custom-button-capture-request.json");
-    private static readonly string CustomCaptureResultPath = Path.Combine(Root, "custom-button-capture-result.json");
-    private static readonly string CustomTestPath = Path.Combine(Root, "custom-button-test.json");
-    private static readonly string CustomTestResultPath = Path.Combine(Root, "custom-button-test-result.json");
+    // Everything this process writes used to live beside its own executable. In a Program Files
+    // installation that directory is read-only for the ordinary user, so the mapping document could
+    // not be written, the log and the heartbeat could not be updated, and the host refused to start
+    // the bridge at all - "KEYBOARD BRIDGE start_aborted=true reason=config_sync_failed" - which left
+    // the remote's mapped keys dead while voice, handled by another process, still worked. The
+    // writable state lives where the host already keeps its own: the user's local application data.
+    private static readonly string StateRoot = ResolveStateRoot();
+    private static readonly string ConfigPath = Path.Combine(StateRoot, "voxdeck-shortcuts.json");
+    private static readonly string LogPath = Path.Combine(StateRoot, "input-bridge-log.txt");
+    private static readonly string HealthPath = Path.Combine(StateRoot, "input-bridge-health.json");
+    private static readonly string CustomCaptureRequestPath = Path.Combine(StateRoot, "custom-button-capture-request.json");
+    private static readonly string CustomCaptureResultPath = Path.Combine(StateRoot, "custom-button-capture-result.json");
+    private static readonly string CustomTestPath = Path.Combine(StateRoot, "custom-button-test.json");
+    private static readonly string CustomTestResultPath = Path.Combine(StateRoot, "custom-button-test-result.json");
+
+    private static string ResolveStateRoot()
+    {
+        try
+        {
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (!string.IsNullOrWhiteSpace(localAppData))
+            {
+                string directory = Path.Combine(localAppData, "Vibe Flow Remote", "UserData");
+                Directory.CreateDirectory(directory);
+                return directory;
+            }
+        }
+        catch { }
+        return Root;
+    }
 
     [STAThread]
     private static void Main(string[] args)
@@ -656,12 +686,23 @@ internal static class VoxDeckInputBridge
     private static void RecordFilterAction(string actionName, bool keyUp)
     {
         Interlocked.Increment(ref filterActionEdgeCount);
-        lastRawActionUtc = DateTime.UtcNow;
-        lastRawAction = (actionName ?? "unknown") + (keyUp ? ":up" : ":down");
-        lastActionSource = "device_filter";
+        RecordRawAction(actionName, keyUp, "device_filter");
         Log("RC003 action routed source=device_filter button=" + (actionName ?? "unknown") +
             " edge=" + (keyUp ? "up" : "down") +
             " revision=" + (config == null ? "" : config.revision ?? ""));
+    }
+
+    private static void RecordRawAction(string actionName, bool keyUp, string source)
+    {
+        string name = actionName ?? "unknown";
+        DateTime nowUtc = DateTime.UtcNow;
+        lastRawActionUtc = nowUtc;
+        lastRawAction = name + (keyUp ? ":up" : ":down");
+        lastActionSource = source;
+        if (keyUp) return;
+        lastRawPressUtc = nowUtc;
+        lastRawPress = name + ":down";
+        lastRawPressSource = source;
     }
 
     private static int VirtualKeyFromRc003FilterEvent(int makeCode, int flags)
@@ -709,9 +750,7 @@ internal static class VoxDeckInputBridge
         string actionName = taskSwitcherNavigation
             ? "task-switcher-navigation"
             : mapping == null ? "unmapped" : mapping.name ?? mapping.labelOrName();
-        lastRawActionUtc = DateTime.UtcNow;
-        lastRawAction = actionName + (keyUp ? ":up" : ":down");
-        lastActionSource = "raw_input";
+        RecordRawAction(actionName, keyUp, "raw_input");
 
         if (taskSwitcherNavigation && ObserveNativeTaskSwitcherNavigation(virtualKey, !keyUp, keyUp))
         {
@@ -4600,6 +4639,9 @@ internal static class VoxDeckInputBridge
             health["last_raw_action_at"] = lastRawActionUtc == DateTime.MinValue ? "" : lastRawActionUtc.ToString("o");
             health["last_raw_action"] = lastRawAction ?? "";
             health["last_action_source"] = lastActionSource ?? "";
+            health["last_raw_press_at"] = lastRawPressUtc == DateTime.MinValue ? "" : lastRawPressUtc.ToString("o");
+            health["last_raw_press"] = lastRawPress ?? "";
+            health["last_raw_press_source"] = lastRawPressSource ?? "";
             ActionExecutionReceipt receipt;
             lock (actionReceiptLock) receipt = lastExecutionReceipt;
             health["last_execution_sequence"] = receipt == null ? 0L : receipt.Sequence;
