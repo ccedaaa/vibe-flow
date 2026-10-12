@@ -160,6 +160,9 @@ internal sealed partial class VibeMicForm : Form
     private string voiceSessionSourceProcess = "";
     private FocusTargetDescriptor voiceSessionSourceTarget;
     private uint voiceSessionClipboardSequence;
+    // Character count of the dictation target captured when the voice key went down.
+    // The WeType paste fallback compares the same control against it before pasting.
+    private int voiceSessionTargetTextLength = -1;
     private Process keyboardBridgeProcess;
     private EventWaitHandle showWindowEvent;
     private EventWaitHandle exitApplicationEvent;
@@ -2391,6 +2394,12 @@ internal sealed partial class VibeMicForm : Form
                 ShouldScheduleProviderPasteFallback("wechat", weTypeSubmitDelivered,
                     false, "recording", 10, 0))
                 throw new InvalidOperationException("WeChat early submit receipt paste policy failed");
+            if (ShouldSkipPasteForChangedTarget(0, 0) ||
+                !ShouldSkipPasteForChangedTarget(0, 12) ||
+                !ShouldSkipPasteForChangedTarget(40, 52) ||
+                ShouldSkipPasteForChangedTarget(-1, 12) ||
+                ShouldSkipPasteForChangedTarget(12, -1))
+                throw new InvalidOperationException("WeChat paste fallback did not honour the target text change guard");
             // No shipped tool defaults to a held shortcut any more, but the hold path stays: a custom
             // slot whose stored trigger is 按住触发 still gets KeyDown / KeyUp from the capture.
             if (ShouldHoldProviderHotkeyForSession("wechat", "hold") ||
@@ -7200,6 +7209,59 @@ deck.Hide();
                 RefreshFocusTargetState();
             });
         });
+    }
+
+    // Owner-approved deviation from the upstream "never read the input box" promise: this build reads only the
+    // character count of the dictation target so the WeType clipboard fallback can tell "the provider never wrote
+    // into the field" from "the provider wrote into the field and also parked the same text on the clipboard"
+    // (the duplicate-sentence case). The text itself is never stored, logged, uploaded, or reused; only the count
+    // is held in memory for the duration of one dictation. Returns -1 whenever the answer would be unsafe to use.
+    private static int ReadFocusedEditableTextLength(string expectedProcessName)
+    {
+        try
+        {
+            IntPtr foreground = GetForegroundWindow();
+            if (foreground == IntPtr.Zero) return -1;
+            uint foregroundProcessId;
+            if (GetWindowThreadProcessId(foreground, out foregroundProcessId) == 0 ||
+                foregroundProcessId == 0) return -1;
+            System.Windows.Automation.AutomationElement focused =
+                System.Windows.Automation.AutomationElement.FocusedElement;
+            if (focused == null) return -1;
+            System.Windows.Automation.AutomationElement.AutomationElementInformation info = focused.Current;
+            if (info.ProcessId != (int)foregroundProcessId) return -1;
+            string expected = FocusTargetDescriptor.NormalizeProcessName(expectedProcessName);
+            if (expected.Length > 0 &&
+                !string.Equals(GetForegroundProcessName(foreground), expected,
+                    StringComparison.OrdinalIgnoreCase)) return -1;
+            object pattern;
+            if (focused.TryGetCurrentPattern(System.Windows.Automation.ValuePattern.Pattern, out pattern))
+            {
+                System.Windows.Automation.ValuePattern value =
+                    pattern as System.Windows.Automation.ValuePattern;
+                if (value != null)
+                {
+                    string current = value.Current.Value;
+                    return current == null ? 0 : current.Length;
+                }
+            }
+            if (focused.TryGetCurrentPattern(System.Windows.Automation.TextPattern.Pattern, out pattern))
+            {
+                System.Windows.Automation.TextPattern text =
+                    pattern as System.Windows.Automation.TextPattern;
+                if (text != null)
+                {
+                    string current = text.DocumentRange.GetText(-1);
+                    return current == null ? 0 : current.Length;
+                }
+            }
+            return -1;
+        }
+        catch (System.Windows.Automation.ElementNotAvailableException) { return -1; }
+        catch (ArgumentException) { return -1; }
+        catch (InvalidOperationException) { return -1; }
+        catch (COMException) { return -1; }
+        catch { return -1; }
     }
 
     private static string GetForegroundProcessName(IntPtr window)
@@ -12569,6 +12631,7 @@ deck.Hide();
         if (wakeOverProvider) textDestinationSeen = true;
         try { voiceSessionClipboardSequence = GetClipboardSequenceNumber(); }
         catch { voiceSessionClipboardSequence = 0; }
+        voiceSessionTargetTextLength = -1;
         if (!string.Equals(wakeForeground, "vibemic", StringComparison.OrdinalIgnoreCase) &&
             !wakeOverProvider)
             voiceSessionSourceProcess = wakeForeground;
@@ -12606,6 +12669,7 @@ deck.Hide();
         if (transient != null)
         {
             ArmVoiceFocusLock(transient, "voice_wake_preflight");
+            voiceSessionTargetTextLength = ReadFocusedEditableTextLength(transient.ProcessName);
             HostLog("VOICE INPUT TARGET ready=true target_id=" + SafeLogValue(transient.Id) +
                 " code=OK action=voice_wake_preflight");
             return true;
@@ -12614,6 +12678,7 @@ deck.Hide();
         if (configuredTarget != null && focusTargetService.ObserveFocusedTarget(configuredTarget, out errorCode))
         {
             ArmVoiceFocusLock(configuredTarget, "voice_wake_preflight_saved");
+            voiceSessionTargetTextLength = ReadFocusedEditableTextLength(configuredTarget.ProcessName);
             HostLog("VOICE INPUT TARGET ready=true target_id=" + SafeLogValue(configuredTarget.Id) +
                 " code=OK action=voice_wake_preflight_saved");
             return true;
@@ -19567,6 +19632,15 @@ deck.Hide();
         return false;
     }
 
+
+    // The provider wrote the sentence into the field itself when the verified target gained text between the
+    // key-down snapshot and this paste. The clipboard payload is then a second copy, so pasting it would leave
+    // two identical sentences. An unreadable surface (-1 on either side) keeps the historical paste behaviour.
+    internal static bool ShouldSkipPasteForChangedTarget(int baselineLength, int currentLength)
+    {
+        if (baselineLength < 0 || currentLength < 0) return false;
+        return currentLength != baselineLength;
+    }
     private void ScheduleProviderPasteFallback(int generation)
     {
         ThreadPool.QueueUserWorkItem(delegate
@@ -19687,6 +19761,21 @@ deck.Hide();
                     });
                     return;
                 }
+                int targetLengthNow = ReadFocusedEditableTextLength(verified.ProcessName);
+                if (ShouldSkipPasteForChangedTarget(voiceSessionTargetTextLength, targetLengthNow))
+                {
+                    HostLog("WETYPE PASTE FALLBACK skipped=true reason=target_already_updated before=" +
+                        voiceSessionTargetTextLength + " after=" + targetLengthNow +
+                        " generation=" + generation);
+                    DispatchUi(delegate
+                    {
+                        ShowToast("输入框已经收到识别文字，未重复粘贴", "info");
+                    });
+                    return;
+                }
+                HostLog("WETYPE PASTE FALLBACK target_length before=" +
+                    voiceSessionTargetTextLength + " after=" + targetLengthNow +
+                    " generation=" + generation);
                 bool down = SendConfiguredHotkey("ctrl+v", false);
                 Thread.Sleep(60);
                 bool up = SendConfiguredHotkey("ctrl+v", true);
