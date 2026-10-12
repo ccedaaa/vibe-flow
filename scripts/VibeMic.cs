@@ -163,6 +163,7 @@ internal sealed partial class VibeMicForm : Form
     // Character count of the dictation target captured when the voice key went down.
     // The WeType paste fallback compares the same control against it before pasting.
     private int voiceSessionTargetTextLength = -1;
+    private int voiceTargetGrowthProbeToken;
     private Process keyboardBridgeProcess;
     private EventWaitHandle showWindowEvent;
     private EventWaitHandle exitApplicationEvent;
@@ -7264,6 +7265,41 @@ deck.Hide();
         catch { return -1; }
     }
 
+
+    // Diagnostic probe (same owner-approved read as above: the character count only). While a dictation
+    // runs it records when the verified target stops growing, so a provider that stops writing into the
+    // field mid-utterance can be placed against the audio timeline. It logs one line per change and goes
+    // quiet once the field has stopped changing. Remove once the stall is understood.
+    private void StartVoiceTargetGrowthProbe(string expectedProcessName)
+    {
+        if (voiceSessionTargetTextLength < 0) return;
+        int token = Interlocked.Increment(ref voiceTargetGrowthProbeToken);
+        int baseline = voiceSessionTargetTextLength;
+        DateTime started = DateTime.UtcNow;
+        string expected = expectedProcessName;
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            int lastChars = baseline;
+            string lastForeground = "";
+            while (Volatile.Read(ref voiceTargetGrowthProbeToken) == token && IsVoiceKeyHeld())
+            {
+                Thread.Sleep(1000);
+                if (Volatile.Read(ref voiceTargetGrowthProbeToken) != token) return;
+                int chars = ReadFocusedEditableTextLength(expected);
+                string foreground = GetForegroundProcessName(GetForegroundWindow());
+                if (chars != lastChars ||
+                    !string.Equals(foreground, lastForeground, StringComparison.OrdinalIgnoreCase))
+                {
+                    HostLog("VOICE TARGET GROWTH t=" +
+                        (DateTime.UtcNow - started).TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture) +
+                        "s chars=" + chars + " delta=" + (chars - baseline) +
+                        " foreground=" + SafeLogValue(foreground));
+                    lastChars = chars;
+                    lastForeground = foreground;
+                }
+            }
+        });
+    }
     private static string GetForegroundProcessName(IntPtr window)
     {
         if (window == IntPtr.Zero) return "";
@@ -12670,6 +12706,7 @@ deck.Hide();
         {
             ArmVoiceFocusLock(transient, "voice_wake_preflight");
             voiceSessionTargetTextLength = ReadFocusedEditableTextLength(transient.ProcessName);
+            StartVoiceTargetGrowthProbe(transient.ProcessName);
             HostLog("VOICE INPUT TARGET ready=true target_id=" + SafeLogValue(transient.Id) +
                 " code=OK action=voice_wake_preflight");
             return true;
@@ -12679,6 +12716,7 @@ deck.Hide();
         {
             ArmVoiceFocusLock(configuredTarget, "voice_wake_preflight_saved");
             voiceSessionTargetTextLength = ReadFocusedEditableTextLength(configuredTarget.ProcessName);
+            StartVoiceTargetGrowthProbe(configuredTarget.ProcessName);
             HostLog("VOICE INPUT TARGET ready=true target_id=" + SafeLogValue(configuredTarget.Id) +
                 " code=OK action=voice_wake_preflight_saved");
             return true;
