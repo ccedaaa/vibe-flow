@@ -7437,9 +7437,9 @@ deck.Hide();
             // Wrapped, not clipped: a fixed 610 px box was tuned for 100%, and at 125% the sentence needs
             // more width than it has, so it was cut off mid-word (measured with
             // scripts/check-ui-geometry.ps1). The wording is short enough to fit one line at 125% while
-            // keeping the distinction the honesty gate requires: audio still works AND the foreground
-            // application may receive the record key.
-            filterWarning = NewLabel("!  未安装签名通道：音频不受影响；连接遥控器时会拦截录音键（键盘 F5 同时被拦截），断开后恢复。详见「自检」。",
+            // keeping the distinction the honesty gate requires: the physical keyboard always passes
+            // through, and the remote's native key effect may also reach the foreground application.
+            filterWarning = NewLabel("!  未安装签名通道：实体键盘始终直通；遥控器录音键的原始按键效果也可能同时发生。详见「自检」。",
                 8.4f, FontStyle.Bold, amber);
             filterWarning.Name = "rc003FilterWarning";
             filterWarning.Location = new Point(52, 190);
@@ -11378,7 +11378,7 @@ deck.Hide();
         // is worse than no statement at all.
         var sourceProtection = StyledCheck(exactDeviceIsolation
             ? "设备级隔离已启用：只有带 RC003 身份的事件会执行遥控器动作"
-            : "未安装签名通道：遥控器连接时会拦截录音键（实体键盘的 F5 同时被拦截），断开后恢复",
+            : "未安装签名通道：实体键盘始终直通；遥控器录音键的原始效果可能同时发生",
             exactDeviceIsolation, new Point(32, 62));
         sourceProtection.Size = new Size(620, 40);
         sourceProtection.AutoCheck = false;
@@ -11391,7 +11391,7 @@ deck.Hide();
         var sourceProtectionNote = NewLabel(
             exactDeviceIsolation ?
             "RC003 专属签名通道已就绪：遥控器原按键被设备级拦截，实体键盘保持原行为。" :
-            "未安装签名通道时，Vibe Link按「遥控器是否在场」判断：在场时拦截录音键（实体键盘的 F5 也同时被拦截），非语音键的原生效果仍会透传。签名通道装上后改为按设备精确拦截。",
+            "未安装签名通道时，Vibe Link不拦截来源未知的 F5：实体键盘始终直通；RC003 录音仍由设备级 Raw Input 驱动，但原始 F5 也可能到达前台。签名通道装上后可精确拦截。",
             8.8f, FontStyle.Regular, muted);
         sourceProtectionNote.Location = new Point(34, 112);
         sourceProtectionNote.Size = new Size(890, 34);
@@ -17490,7 +17490,7 @@ deck.Hide();
         BridgeHealthSnapshot bridgeHealth = ReadKeyboardBridgeHealth();
         result.AppendLine("按键路由：" + (bridgeHealth.FilterHealthy ? "设备级精确隔离" :
             string.Equals(bridgeHealth.RoutingAuthority, "raw_input", StringComparison.OrdinalIgnoreCase) ?
-            "Raw Input 安全直通" : "未确认") + "  ·  设备事件 " + bridgeHealth.RawRemoteEdges +
+            "Raw Input 安全直通（F5 fail-open）" : "未确认") + "  ·  设备事件 " + bridgeHealth.RawRemoteEdges +
             "  ·  动作事件 " + (bridgeHealth.RawActionEdges + bridgeHealth.FilterActionEdges) +
             (string.IsNullOrWhiteSpace(bridgeHealth.LastRawAction) ? "" : "  ·  最近 " + bridgeHealth.LastRawAction));
         result.AppendLine("VB-CABLE：Input " + (HasCableInput() ? "已检测" : "未检测") + " / Output " + (HasCableOutput() ? "已检测" : "未检测"));
@@ -17810,7 +17810,7 @@ deck.Hide();
         bool routingReady = string.Equals(bridge.InputRoutingMode, configuredRoutingMode, StringComparison.OrdinalIgnoreCase);
         bool authorityReady = string.Equals(bridge.RoutingAuthority, "raw_input", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(bridge.RoutingAuthority, "device_filter", StringComparison.OrdinalIgnoreCase);
-        string isolationLabel = bridge.FilterHealthy ? "设备级精确隔离" : "Raw Input 安全直通";
+        string isolationLabel = bridge.FilterHealthy ? "设备级精确隔离" : "Raw Input 安全直通（F5 fail-open）";
         string keyState = !keyboardRunning || !bridge.Healthy || !mappingReady || !routingReady || !authorityReady
             ? "fail" : recentAction ? "pass" : "checking";
         report.Items.Add(new SelfCheckItem("keys", "遥控器按键监听",
