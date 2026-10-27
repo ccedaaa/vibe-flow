@@ -905,6 +905,18 @@ internal static class VoxDeckInputBridge
             if (GestureBindingStore.ResolveSteps(
                 ToGestureEntry(new ShortcutMapping { name = "up" }), GestureKind.Short).Count != 0)
                 throw new InvalidOperationException("A gesture layer with no action resolved to something instead of nothing");
+            // Raw Input must pass the physical key through so the packet can be read. When the
+            // selected layer resolves to that same key, injecting it again makes one RC003 press
+            // move twice. The native event already delivered the action.
+            var nativeArrowMapping = new ShortcutMapping {
+                name = "left", label = "左键", vk = "Left", scan = "0x4B", sourceType = "keyboard"
+            };
+            if (!ShouldUseNativeRawPassthrough(nativeArrowMapping, "left", "raw_input") ||
+                ShouldUseNativeRawPassthrough(nativeArrowMapping, "right", "raw_input") ||
+                ShouldUseNativeRawPassthrough(nativeArrowMapping, "left", "device_filter") ||
+                ShouldUseNativeRawPassthrough(nativeArrowMapping, "ctrl+left", "raw_input"))
+                throw new InvalidOperationException(
+                    "A same-key Raw Input action would be injected after Windows already received it");
             // One action per layer: a mapping whose double layer carries a single action must resolve to
             // exactly that, and the removal of macros must leave no way for a mapping document to smuggle a
             // multi-step sequence back in.
@@ -1818,7 +1830,13 @@ internal static class VoxDeckInputBridge
                 }
                 else
                 {
-                    bool success = TapShortcut(mapping);
+                    bool nativePassthrough = ShouldUseNativeRawPassthrough(
+                        mapping, mapping.shortcut, source);
+                    if (nativePassthrough)
+                        Log("Shortcut action skipped label=" + mapping.labelOrName() +
+                            " action=" + mapping.shortcut +
+                            " reason=raw_input_native_passthrough");
+                    bool success = nativePassthrough || TapShortcut(mapping);
                         RecordActionExecution(mapping, "单击", mapping.shortcut, success, source);
                     BridgeForm.SetStatusText(mapping.labelOrName() + " 轻触 -> " + mapping.shortcut);
                 }
@@ -2057,6 +2075,21 @@ internal static class VoxDeckInputBridge
         }
     }
 
+    private static bool ShouldUseNativeRawPassthrough(ShortcutMapping mapping, string action, string source)
+    {
+        if (mapping == null ||
+            !string.Equals(source, "raw_input", StringComparison.OrdinalIgnoreCase) ||
+            !(mapping.sourceType ?? "keyboard").Equals("keyboard", StringComparison.OrdinalIgnoreCase))
+            return false;
+        string normalized = (action ?? "").Trim();
+        if (normalized.StartsWith("shortcut:", StringComparison.OrdinalIgnoreCase))
+            normalized = normalized.Substring("shortcut:".Length).Trim();
+        List<int> keys = ParseShortcut(normalized);
+        if (keys.Count != 1) return false;
+        int physicalKey = VkFromName(mapping.vk);
+        return physicalKey > 0 && keys[0] == physicalKey;
+    }
+
     private static bool ExecuteMappingAction(ShortcutMapping source, string action, string phase, string actionSource)
     {
         string normalized = (action ?? "").Trim();
@@ -2067,6 +2100,14 @@ internal static class VoxDeckInputBridge
             BridgeForm.SetStatusText(source.labelOrName() + " " + phase + "未执行");
             RecordActionExecution(source, phase, normalized, false, actionSource);
             return false;
+        }
+        if (ShouldUseNativeRawPassthrough(source, normalized, actionSource))
+        {
+            Log("Gesture action skipped label=" + source.labelOrName() + " phase=" + phase +
+                " action=" + normalized + " reason=raw_input_native_passthrough");
+            BridgeForm.SetStatusText(source.labelOrName() + " " + phase + " -> " + normalized);
+            RecordActionExecution(source, phase, normalized, true, actionSource);
+            return true;
         }
 
         var mapping = new ShortcutMapping
